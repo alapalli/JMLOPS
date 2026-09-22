@@ -1,0 +1,491 @@
+// ─────────────────────────────────────────────────────────────
+// JML Ops · Prisma Schema
+// PostgreSQL 16 + pgvector + RLS
+// ─────────────────────────────────────────────────────────────
+enum AssetType {
+  LAPTOP
+  PHONE
+  BADGE
+  MONITOR
+  OTHER
+}
+
+enum AssetStatus {
+  ASSIGNED
+  RETURNED
+  LOST
+}
+
+model Asset {
+  id             String      @id @default(uuid())
+  companyId      String
+  employeeId     String?     // nullable — an asset can exist unassigned (in inventory)
+  type           AssetType
+  label          String      // display name, e.g. "MacBook Pro 14" — 2026"
+  serialNumber   String?
+  status         AssetStatus @default(ASSIGNED)
+  assignedAt     DateTime    @default(now())
+  returnedAt     DateTime?
+  notes          String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  company        Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee       Employee?   @relation(fields: [employeeId], references: [id])
+
+  @@index([companyId, status])
+  @@index([employeeId])
+}
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions", "multiSchema"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector"), uuidOssp(map: "uuid-ossp"), pgTrgm(map: "pg_trgm")]
+}
+
+// ── ENUMS ────────────────────────────────────────────────────
+
+enum JmlEventType {
+  JOINER
+  MOVER
+  LEAVER
+  ACCESS_REVIEW
+  EMERGENCY_LEAVER
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  PARTIALLY_FAILED
+  CANCELLED
+  @@map("JmlJobStatus")
+}
+
+enum ConnectorType {
+  OKTA
+  ENTRA_ID
+  GOOGLE_WORKSPACE
+  SLACK
+  GITHUB
+  GITLAB
+  JIRA
+  JSM                 // Jira Service Management
+  SALESFORCE
+  SAP_CIS
+  SAP_SUCCESSFACTORS
+  LINEAR
+  AWS_IAM
+  SENTINEL
+  ONE_PASSWORD
+  FIGMA
+  NOTION
+  ZOOM
+  CUSTOM_SCIM
+}
+
+enum ConnectorStatus {
+  ACTIVE
+  ERROR
+  UNCONFIGURED
+  DISABLED
+}
+
+enum AiProvider {
+  ANTHROPIC
+  OLLAMA
+  OPENAI
+}
+
+enum PlanTier {
+  FREE
+  STARTER
+  GROWTH
+  SCALE
+  ENTERPRISE
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  IT_MANAGER
+  SECURITY_ANALYST
+  COMPLIANCE_AUDITOR
+  PEOPLE_MANAGER
+  VIEWER
+}
+
+// ── COMPANIES (tenants) ──────────────────────────────────────
+
+model Company {
+  id          String    @id @default(uuid())
+  name        String
+  domain      String    @unique
+  slug        String    @unique
+  plan        PlanTier  @default(FREE)
+  logoUrl     String?
+  timezone    String    @default("UTC")
+  country     String?   // "DE" | "IN" | ...
+  dataRegion  String    @default("eu-central-1")
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  assets              Asset[]
+  changeRequests      ChangeRequest[]
+  users               User[]
+  employees           Employee[]
+  connectors          Connector[]
+  roleTemplates       RoleTemplate[]
+  provisioningJobs    ProvisioningJob[]
+  auditLogs           AuditLog[]
+  aiCalls             AiCall[]
+  jsmTickets          JsmTicket[]
+
+  @@index([domain])
+  @@index([slug])
+  @@map("companies")
+}
+
+// ── USERS (JML Ops admin accounts) ──────────────────────────
+
+model User {
+  id                String    @id @default(uuid())
+  companyId         String
+  email             String
+  name              String
+  role              UserRole  @default(IT_MANAGER)
+  avatarUrl         String?
+  isActive          Boolean   @default(true)
+  lastLoginAt       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  employeeId        String?
+  employee          Employee? @relation(fields: [employeeId, companyId], references: [id, companyId])
+  requestedChanges  ChangeRequest[] @relation("RequestedChanges")
+  reviewedChanges   ChangeRequest[] @relation("ReviewedChanges")
+
+  // SSO account linkage — the actual verified identity, not just email.
+  // Email alone is not a safe unique key for SSO: it can change at the
+  // provider, and matching only on email risks account-takeover if two
+  // providers both claim the same address without verifying it the same way.
+  authProvider      AuthProvider
+  providerAccountId String    // the provider's own immutable subject/user ID (e.g. Google 'sub' claim, Microsoft 'oid' claim)
+
+  company           Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([id, companyId])
+  @@unique([companyId, email])
+  @@unique([authProvider, providerAccountId])
+  @@index([companyId])
+  @@map("users")
+}
+
+enum AuthProvider {
+  GOOGLE
+  MICROSOFT
+}
+
+// ── EMPLOYEES (the people being provisioned) ─────────────────
+
+model Employee {
+  id            String    @id @default(uuid())
+  companyId     String
+  externalId    String?   // ID from HRIS (SAP SF, BambooHR, etc.)
+  email         String
+  name          String
+  firstName     String
+  lastName      String
+  department    String?
+  jobTitle      String?
+  location      String?
+  managerId     String?
+  manager       Employee? @relation("ManagerEmployee", fields: [managerId], references: [id])
+  reports       Employee[] @relation("ManagerEmployee")
+  startDate     DateTime?
+  endDate       DateTime?
+  isActive      Boolean   @default(true)
+  metadata      Json?     // extra HRIS fields as JSON
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  jobs          ProvisioningJob[]
+  users         User[]
+  assets        Asset[]
+  changeRequests ChangeRequest[]
+
+  @@unique([id, companyId])
+  @@unique([companyId, email])
+  @@index([companyId])
+  @@index([externalId])
+  @@map("employees")
+}
+
+// ── CONNECTORS ───────────────────────────────────────────────
+
+model Connector {
+  id           String          @id @default(uuid())
+  companyId    String
+  type         ConnectorType
+  name         String          // display name, e.g. "Acme GitHub"
+  status       ConnectorStatus @default(UNCONFIGURED)
+  config       Json?           // encrypted connection config
+  scimEndpoint String?
+  lastSyncAt   DateTime?
+  lastErrorAt  DateTime?
+  lastError    String?
+  errorCount   Int             @default(0)
+  isEnabled    Boolean         @default(true)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  company      Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  jobSteps     JobStep[]
+
+  @@unique([companyId, type])
+  @@index([companyId])
+  @@map("connectors")
+}
+
+// ── ROLE TEMPLATES ───────────────────────────────────────────
+
+model RoleTemplate {
+  id           String    @id @default(uuid())
+  companyId    String
+  name         String    // e.g. "Backend Engineer"
+  department   String?
+  connectorMap Json      // { "GITHUB": { team: "engineering", role: "member" }, ... }
+  isDefault    Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  company      Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  jobs         ProvisioningJob[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("role_templates")
+}
+
+// ── PROVISIONING JOBS ────────────────────────────────────────
+
+model ProvisioningJob {
+  id               String        @id @default(uuid())
+  companyId        String
+  employeeId       String?
+  templateId       String?
+  eventType        JmlEventType
+  status           JobStatus     @default(PENDING)
+  priority         Int           @default(5)  // 10=LEAVER, 5=JOINER, 3=MOVER
+  prompt           String?       // original natural language prompt
+  parsedIntent     Json?         // ProvisioningIntent from AI
+  aiModel          String?       // which model parsed this
+  aiCallId         String?
+  totalSteps       Int           @default(0)
+  completedSteps   Int           @default(0)
+  failedSteps      Int           @default(0)
+  startedAt        DateTime?
+  completedAt      DateTime?
+  errorMessage     String?
+  triggeredBy      String?       // "prompt" | "hris_webhook" | "slack_bot" | "jsm_ticket"
+  jsmTicketKey     String?       // JSM ticket created for this job
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  company          Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee         Employee?     @relation(fields: [employeeId], references: [id])
+  template         RoleTemplate? @relation(fields: [templateId], references: [id])
+  steps            JobStep[]
+
+  @@index([companyId, status])
+  @@index([companyId, eventType])
+  @@index([createdAt])
+  @@map("provisioning_jobs")
+}
+
+// ── JOB STEPS (per-connector result) ─────────────────────────
+
+model JobStep {
+  id            String      @id @default(uuid())
+  jobId         String
+  connectorId   String
+  connectorType ConnectorType
+  status        JobStatus   @default(PENDING)
+  action        String      // "provision" | "deprovision" | "update"
+  payload       Json?       // what was sent
+  response      Json?       // what came back
+  durationMs    Int?
+  retryCount    Int         @default(0)
+  errorMessage  String?
+  createdAt     DateTime    @default(now())
+  completedAt   DateTime?
+
+  job           ProvisioningJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  connector     Connector       @relation(fields: [connectorId], references: [id])
+
+  @@index([jobId])
+  @@map("job_steps")
+}
+
+// ── AUDIT LOG (append-only, HMAC-signed) ─────────────────────
+
+model AuditLog {
+  id           String    @id @default(uuid())
+  companyId    String
+  eventType    JmlEventType
+  actorId      String?   // User.id who triggered
+  actorEmail   String?
+  employeeId   String?
+  employeeEmail String?
+  jobId        String?
+  connectorType ConnectorType?
+  action       String    // human-readable action description
+  payload      Json?     // full event payload
+  ipAddress    String?
+  userAgent    String?
+  hmac         String    // HMAC-SHA256 of (id+companyId+eventType+action+createdAt)
+  createdAt    DateTime  @default(now())
+
+  company      Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // NOTE: UPDATE and DELETE are blocked by PostgreSQL trigger (see init.sql)
+  @@index([companyId, eventType])
+  @@index([companyId, createdAt])
+  @@index([employeeId])
+  @@map("audit_log")
+}
+
+// ── AI CALLS (cost + latency tracking) ───────────────────────
+
+model AiCall {
+  id              String    @id @default(uuid())
+  companyId       String
+  jobId           String?
+  provider        AiProvider
+  model           String    // e.g. "claude-sonnet-4-6", "qwen2.5:27b"
+  isLocal         Boolean   // true = Ollama, false = cloud API
+  task            String    // "classify" | "parse_intent" | "generate_email" | ...
+  inputTokens     Int       @default(0)
+  outputTokens    Int       @default(0)
+  totalTokens     Int       @default(0)
+  costUsd         Decimal?  @db.Decimal(10,6)  // null for local models
+  durationMs      Int
+  cacheHit        Boolean   @default(false)
+  error           String?
+  createdAt       DateTime  @default(now())
+
+  company         Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // TimescaleDB hypertable target (run: SELECT create_hypertable(...))
+  @@index([companyId, createdAt])
+  @@index([model, createdAt])
+  @@map("ai_calls")
+}
+
+// ── JSM TICKETS ──────────────────────────────────────────────
+
+model JsmTicket {
+  id          String    @id @default(uuid())
+  companyId   String
+  jobId       String?
+  ticketKey   String    // e.g. "IT-1234"
+  ticketUrl   String?
+  summary     String
+  status      String    @default("Open")  // mirrors JSM status
+  createdAt   DateTime  @default(now())
+  closedAt    DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([jobId])
+  @@map("jsm_tickets")
+}
+
+// ── EMBEDDINGS (RAG for access review queries) ────────────────
+
+model Embedding {
+  id          String    @id @default(uuid())
+  companyId   String
+  sourceType  String    // "employee" | "policy" | "role_template"
+  sourceId    String
+  content     String    // the text that was embedded
+  vector      Unsupported("vector(768)")?  // nomic-embed-text dim
+  createdAt   DateTime  @default(now())
+
+  @@index([companyId, sourceType])
+  @@map("embeddings")
+}
+
+
+enum AssetType {
+  LAPTOP
+  PHONE
+  BADGE
+  MONITOR
+  OTHER
+}
+
+enum AssetStatus {
+  AVAILABLE
+  ASSIGNED
+  RETURNED
+  LOST
+}
+
+enum ChangeRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model Asset {
+  id           String @id @default(uuid())
+  companyId    String
+  employeeId   String?
+  type         AssetType
+  label        String
+  serialNumber String?
+  status       AssetStatus @default(AVAILABLE)
+  assignedAt   DateTime @default(now())
+  returnedAt   DateTime?
+  notes        String?
+  company      Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee     Employee? @relation(fields: [employeeId, companyId], references: [id, companyId])
+
+  @@index([companyId, assignedAt])
+  @@map("assets")
+}
+
+model ChangeRequest {
+  id             String @id @default(uuid())
+  companyId      String
+  requestedById  String
+  reviewedById   String?
+  employeeId     String?
+  requestType    String?
+  prompt         String
+  reason         String?
+  status         ChangeRequestStatus @default(PENDING)
+  reviewNote     String?
+  resultingJobId String? @unique
+  createdAt      DateTime @default(now())
+  reviewedAt     DateTime?
+  company        Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  requestedBy    User @relation("RequestedChanges", fields: [requestedById, companyId], references: [id, companyId])
+  reviewedBy     User? @relation("ReviewedChanges", fields: [reviewedById, companyId], references: [id, companyId])
+  employee       Employee? @relation(fields: [employeeId, companyId], references: [id, companyId])
+
+  @@index([companyId, status, createdAt])
+  @@index([companyId, requestedById])
+  @@map("change_requests")
+}

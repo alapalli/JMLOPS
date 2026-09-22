@@ -1,0 +1,48 @@
+# Local-image, HTTP-only override for the temporary IP-based demo.
+services:
+  nginx:
+    ports: !override
+      - "80:80"
+      - "443:443"
+    volumes: !override
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      - certbot_www:/var/www/certbot:ro
+
+  certbot:
+    profiles: ["tls"]
+
+  litellm:
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  api:
+    image: local/jmlops-api:latest
+    environment:
+      API_ORIGIN: ${API_ORIGIN}
+      WEB_ORIGIN: ${WEB_ORIGIN}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://localhost:4000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+
+  worker:
+    image: local/jmlops-worker:latest
+
+  web:
+    image: local/jmlops-web:latest
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://localhost:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))

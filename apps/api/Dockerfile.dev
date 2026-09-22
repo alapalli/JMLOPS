@@ -1,0 +1,26 @@
+# ─────────────────────────────────────────────────────────────
+# JML Ops · API · Dockerfile.dev
+# Hot-reload with tsx watch
+# ─────────────────────────────────────────────────────────────
+FROM node:22-alpine
+
+RUN apk add --no-cache curl
+
+# Enable corepack for pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy workspace manifests first (layer cache)
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/db/package.json   ./packages/db/
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/connectors/package.json ./packages/connectors/
+
+# Install deps
+RUN pnpm install --frozen-lockfile
+
+# Source is volume-mounted — no COPY src needed in dev
+EXPOSE 4000
+
+CMD ["pnpm", "dev"]

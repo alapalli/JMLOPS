@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+.env
+.env.*
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/*.tsbuildinfo
+infra/prod/certs

@@ -1,0 +1,220 @@
+# ─────────────────────────────────────────────────────────────────
+# JML Ops · Dev Stack · docker-compose.yml
+# Usage: docker compose up -d   (run from repo root)
+# Ollama runs NATIVELY — start it separately: ollama serve
+# ─────────────────────────────────────────────────────────────────
+name: jmlops
+
+services:
+
+  # ── PostgreSQL 16 + pgvector ─────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: jmlops-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      POSTGRES_DB:       ${POSTGRES_DB:-jmlops}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/dev/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dev} -d ${POSTGRES_DB:-jmlops}"]
+      interval: 5s
+      timeout:  5s
+      retries:  10
+    networks:
+      - jmlops
+
+  # ── Redis 7 ──────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: jmlops-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfilename jmlops.aof
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test:     ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout:  3s
+      retries:  5
+    networks:
+      - jmlops
+
+  # ── LiteLLM AI Gateway ───────────────────────────────────────
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: jmlops-litellm
+    restart: unless-stopped
+    ports:
+      - "4002:4002"
+    volumes:
+      - ./infra/dev/litellm.yaml:/app/config.yaml:ro
+    environment:
+      ANTHROPIC_API_KEY:  ${ANTHROPIC_API_KEY:-}
+      OLLAMA_BASE_URL:    ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      DATABASE_URL:       postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:-dev}@postgres:5432/${POSTGRES_DB:-jmlops}
+      REDIS_URL:          redis://redis:6379
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-master}
+    command: ["--config", "/app/config.yaml", "--port", "4002", "--num_workers", "2"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks:
+      - jmlops
+
+  # ── Fastify API ───────────────────────────────────────────────
+  api:
+    build:
+      context:    ./apps/api
+      dockerfile: Dockerfile.dev
+    container_name: jmlops-api
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./apps/api:/app
+      - ./packages:/packages
+      - /app/node_modules
+    environment:
+      NODE_ENV:            development
+      API_PORT:            "4000"
+      DATABASE_URL:        postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:-dev}@postgres:5432/${POSTGRES_DB:-jmlops}
+      REDIS_URL:           redis://redis:6379
+      LITELLM_URL:         http://litellm:4002
+      LITELLM_MASTER_KEY:  ${LITELLM_MASTER_KEY:-sk-dev-master}
+      JWT_SECRET:          ${JWT_SECRET:-dev-jwt-secret-change-in-prod}
+      JWT_EXPIRY:          ${JWT_EXPIRY:-24h}
+      GOOGLE_CLIENT_ID:    ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      API_ORIGIN:          ${API_ORIGIN:-http://localhost:4000}
+      WEB_ORIGIN:          ${WEB_ORIGIN:-http://localhost:3000}
+      SMTP_HOST:           mailpit
+      SMTP_PORT:           "1025"
+      LOG_LEVEL:           ${LOG_LEVEL:-debug}
+      AUDIT_HMAC_SECRET:   ${AUDIT_HMAC_SECRET:?AUDIT_HMAC_SECRET must be set — see .env.example}
+      CORS_ORIGINS:        ${CORS_ORIGINS:-http://localhost:3000}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      litellm:  { condition: service_started }
+    networks:
+      - jmlops
+
+  # ── BullMQ Worker ─────────────────────────────────────────────
+  worker:
+    build:
+      context:    ./apps/worker
+      dockerfile: Dockerfile.dev
+    container_name: jmlops-worker
+    restart: unless-stopped
+    volumes:
+      - ./apps/worker:/app
+      - ./packages:/packages
+      - /app/node_modules
+    environment:
+      NODE_ENV:            development
+      DATABASE_URL:        postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:-dev}@postgres:5432/${POSTGRES_DB:-jmlops}
+      REDIS_URL:           redis://redis:6379
+      LITELLM_URL:         http://litellm:4002
+      LITELLM_MASTER_KEY:  ${LITELLM_MASTER_KEY:-sk-dev-master}
+      WORKER_CONCURRENCY:  ${WORKER_CONCURRENCY:-4}
+      LOG_LEVEL:           ${LOG_LEVEL:-debug}
+      ENABLE_SCIM:         ${ENABLE_SCIM:-false}
+      OKTA_DOMAIN:         ${OKTA_DOMAIN:-}
+      OKTA_API_TOKEN:      ${OKTA_API_TOKEN:-}
+      AUDIT_HMAC_SECRET:   ${AUDIT_HMAC_SECRET:?AUDIT_HMAC_SECRET must be set — see .env.example}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      litellm:  { condition: service_started }
+    networks:
+      - jmlops
+
+  # ── Next.js Frontend ─────────────────────────────────────────
+  web:
+    build:
+      context:    ./apps/web
+      dockerfile: Dockerfile.dev
+    container_name: jmlops-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      NODE_ENV:                development
+      NEXT_PUBLIC_API_URL:     http://localhost:4000
+      NEXT_PUBLIC_WS_URL:      ws://localhost:4000
+      NEXT_PUBLIC_APP_NAME:    JML Ops
+      NEXT_PUBLIC_APP_VERSION: ${npm_package_version:-0.1.0}
+    depends_on:
+      - api
+    networks:
+      - jmlops
+
+  # ── Mailpit (email catch-all) ─────────────────────────────────
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: jmlops-mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"   # Web UI
+      - "1025:1025"   # SMTP
+    environment:
+      MP_MAX_MESSAGES:    1000
+      MP_SMTP_AUTH_ACCEPT_ANY: true
+    networks:
+      - jmlops
+
+  # ── Adminer (DB browser) ──────────────────────────────────────
+  adminer:
+    image: adminer:latest
+    container_name: jmlops-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN:         dracula
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks:
+      - jmlops
+
+  # ── Redis Commander (queue browser) ──────────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: jmlops-redis-ui
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    depends_on:
+      - redis
+    networks:
+      - jmlops
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  jmlops:
+    driver: bridge
