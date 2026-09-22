@@ -1,0 +1,51 @@
+// ─────────────────────────────────────────────────────────────
+// Add this to packages/db/prisma/schema.prisma — additive only,
+// doesn't modify any field on an existing model except adding
+// one new relation array to Employee (shown at the bottom).
+// ─────────────────────────────────────────────────────────────
+
+enum AssetType {
+  LAPTOP
+  PHONE
+  BADGE
+  MONITOR
+  OTHER
+}
+
+enum AssetStatus {
+  ASSIGNED
+  RETURNED
+  LOST
+}
+
+model Asset {
+  id             String      @id @default(uuid())
+  companyId      String
+  employeeId     String?     // nullable — an asset can exist unassigned (in inventory)
+  type           AssetType
+  label          String      // display name, e.g. "MacBook Pro 14" — 2026"
+  serialNumber   String?
+  status         AssetStatus @default(ASSIGNED)
+  assignedAt     DateTime    @default(now())
+  returnedAt     DateTime?
+  notes          String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  company        Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee       Employee?   @relation(fields: [employeeId], references: [id])
+
+  @@index([companyId, status])
+  @@index([employeeId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Add this ONE relation field to the EXISTING Employee model —
+// purely additive, doesn't touch any existing field:
+//
+//   assets Asset[]
+//
+// And this ONE relation field to the EXISTING Company model:
+//
+//   assets Asset[]
+// ─────────────────────────────────────────────────────────────
